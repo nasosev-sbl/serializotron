@@ -2575,7 +2575,12 @@ toProtoDynamicCore typeInfo = \case
     let globalIndex = case typeInfo of
           Just info -> resolveConstructorIndex (Just info) index value
           Nothing -> index
-        constructorName = maybe (Text.pack (show globalIndex)) (lookupConstructorName globalIndex) typeInfo
+        -- Use empty string when type info is unavailable. This occurs for
+        -- nested sum types in GHC Generics (e.g., 3+ constructor types where
+        -- (:+:) nesting creates inner DSum values without type info). The
+        -- constructor INDEX is always correct; the name is only for validation.
+        -- An empty name causes the decoder to skip the name-match check.
+        constructorName = maybe Text.empty (lookupConstructorName globalIndex) typeInfo
         branchTi = case typeInfo >>= view tiStructure of
           Just (TSSum branches) -> branches ^? ix (fromIntegral index)
           _ -> Nothing
