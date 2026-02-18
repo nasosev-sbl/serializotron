@@ -142,6 +142,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.Char (chr, ord)
 import Data.Int (Int32)
 import Data.List (elemIndex)
+import Data.Map.Lazy qualified as Map.Lazy
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isNothing)
 import Data.ProtoLens (decodeMessage, defMessage, encodeMessage)
@@ -3571,29 +3572,44 @@ saveSztMetadataWithCompression compression path types = do
 
   ByteString.writeFile path finalBytes
 
--- Resolve references in a DynamicValue using the shared table
+-- Resolve references in a DynamicValue using the shared table.
+--
+-- Uses lazy memoization (tying-the-knot) to ensure each shared table
+-- entry is resolved at most once, regardless of how many times it is
+-- referenced. This is critical for heavily-deduplicated data where the
+-- same subtree (e.g. Topology, Domain) may be referenced hundreds of
+-- times. Without memoization, resolution is O(n * m) where n is the
+-- number of references and m is the average subtree size; with
+-- memoization it is O(total_nodes).
+--
+-- The shared table forms a DAG by construction from the deduplicator,
+-- so cycles cannot occur. If a cycle were present, GHC's runtime would
+-- detect it as a <<loop>> error.
 resolveReferences :: Map.Map Word32 (Either SerializotronError DynamicValue) -> DynamicValue -> Either SerializotronError DynamicValue
-resolveReferences sharedTable = resolveValue Set.empty
+resolveReferences sharedTable rootValue = resolveValue rootValue
   where
-    resolveValue :: Set.Set Word32 -> DynamicValue -> Either SerializotronError DynamicValue
-    resolveValue visiting (DynamicValue core typeInfo version shallowId) = do
-      resolvedCore <- resolveCore visiting core
+    -- Pre-resolved shared table: each entry is resolved at most once
+    -- via Haskell's lazy evaluation. Must use Map.Lazy.map (not
+    -- Map.Strict.map) because strict map forces values to WHNF during
+    -- construction, which would cause <<loop>> when entries reference
+    -- each other.
+    resolvedTable :: Map.Map Word32 (Either SerializotronError DynamicValue)
+    resolvedTable = Map.Lazy.map (>>= resolveValue) sharedTable
+
+    resolveValue :: DynamicValue -> Either SerializotronError DynamicValue
+    resolveValue (DynamicValue core typeInfo version shallowId) = do
+      resolvedCore <- resolveCore core
       return $ DynamicValue resolvedCore typeInfo version shallowId
 
-    resolveCore :: Set.Set Word32 -> DynamicCore -> Either SerializotronError DynamicCore
-    resolveCore visiting = \case
+    resolveCore :: DynamicCore -> Either SerializotronError DynamicCore
+    resolveCore = \case
       DPrimitive pv -> return $ DPrimitive pv
-      DProduct vals -> DProduct <$> traverse (resolveValue visiting) vals
-      DSum i val -> DSum i <$> resolveValue visiting val
-      DList vals -> DList <$> traverse (resolveValue visiting) vals
+      DProduct vals -> DProduct <$> traverse resolveValue vals
+      DSum i val -> DSum i <$> resolveValue val
+      DList vals -> DList <$> traverse resolveValue vals
       DUnit -> return DUnit
       DReference refId ->
-        if Set.member refId visiting
-          then Left $ ValidationError (CyclicReferences [refId])
-          else case Map.lookup refId sharedTable of
-            Nothing -> Left $ ValidationError (DanglingReference refId)
-            Just (Left err) -> Left err
-            Just (Right sharedValue) -> do
-              -- Add this reference to the visiting set to detect cycles
-              resolvedShared <- resolveValue (Set.insert refId visiting) sharedValue
-              return $ _dvCore resolvedShared
+        case Map.lookup refId resolvedTable of
+          Nothing -> Left $ ValidationError (DanglingReference refId)
+          Just (Left err) -> Left err
+          Just (Right resolvedShared) -> return $ _dvCore resolvedShared
