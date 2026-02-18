@@ -942,10 +942,22 @@ deduplicateValue strat rootValue
 -- where cryptographic security is not required.
 type HashableHash = Int
 
+-- | Entry in the seen-hashes table during deduplication.
+--
+-- 'FirstSeen' records the original (un-deduplicated) value on first
+-- encounter.  When a duplicate is confirmed, 'Promoted' records the
+-- reference ID *and* retains the original for equality comparison with
+-- future occurrences (since the shared-table copy has already had its
+-- children deduplicated and therefore differs structurally).
+data SeenEntry
+  = FirstSeen  DynamicValue           -- ^ Original value (first encounter)
+  | Promoted   Word32 DynamicValue    -- ^ (refId, original) — promoted to shared table
+  deriving stock (Show)
+
 -- | State for fast deduplication using Hashable
 data FastDeduplicationState = FastDeduplicationState
   { _fastNextReferenceId  :: Word32
-  , _fastSeenHashes       :: Map.Map HashableHash (Either DynamicValue Word32)  -- Left = first occurrence, Right = ref ID
+  , _fastSeenHashes       :: Map.Map HashableHash SeenEntry
   , _fastSharedTable      :: Map.Map Word32 DynamicValue
   , _fastCurrentDepth     :: Int
   , _fastStrategy         :: DeduplicationStrategy
@@ -1069,19 +1081,20 @@ deduplicateValueFast strat rootValue
               seen <- use $ fastSeenHashes . at fastHash
 
               result <- case seen of
-                Just (Right refId) -> do
-                  -- Already seen - return reference
+                Just (Promoted refId _) -> do
+                  -- Already seen twice+ - return reference
                   return $ DynamicValue (DReference refId) Nothing currentSchemaVersion Nothing
-                Just (Left firstOccurrence) -> do
-                  -- Second occurrence - create shared entry
+                Just (FirstSeen firstOccurrence) -> do
+                  -- Second occurrence - create shared entry with deduped children
                   newId <- use fastNextReferenceId
                   fastNextReferenceId .= (newId + 1)
-                  fastSharedTable . at newId ?= firstOccurrence
-                  fastSeenHashes . at fastHash ?= Right newId
+                  dedupedFirst <- deduplicateChildrenFast firstOccurrence
+                  fastSharedTable . at newId ?= dedupedFirst
+                  fastSeenHashes . at fastHash ?= Promoted newId firstOccurrence
                   return $ DynamicValue (DReference newId) Nothing currentSchemaVersion Nothing
                 Nothing -> do
                   -- First occurrence - record and process children
-                  fastSeenHashes . at fastHash ?= Left dynVal
+                  fastSeenHashes . at fastHash ?= FirstSeen dynVal
                   dedupedVal <- deduplicateChildrenFast dynVal
                   return dedupedVal
 
@@ -1202,43 +1215,45 @@ deduplicateValueShallowWithStats strat rootValue
                   shallowIdBytes = tryExtractShallowId dynVal
 
               result <- case seen of
-                Just (Right refId) -> do
-                  -- Hash collision detected - need to check equality for approximate hashing
-                  candidateVal <- use $ fastSharedTable . at refId
-                  case candidateVal of
-                    Just candidate | dynVal == candidate -> do
-                      -- True duplicate confirmed by equality check!
+                Just (Promoted refId originalVal)
+                  | dynVal == originalVal -> do
+                      -- True duplicate confirmed by equality check against original!
                       let !_ = emitEvent (Text.pack typeName) hasShallowId hashPreview fullHashPreview shallowIdBytes True estimatedSz
                       fastStats . typeDeduplicated %= Map.insertWith (+) typeName 1
                       let savedBytes = estimateSize dynVal
                       fastStats . typeBytesSaved %= Map.insertWith (+) typeName savedBytes
                       return $ DynamicValue (DReference refId) Nothing currentSchemaVersion Nothing
-                    _ -> do
+                  | otherwise -> do
                       -- Hash collision - not actually equal, treat as new value
-                      fastSeenHashes . at shallowHash ?= Left dynVal
+                      fastSeenHashes . at shallowHash ?= FirstSeen dynVal
                       dedupedVal <- deduplicateChildrenShallow dynVal
                       return dedupedVal
-                Just (Left firstOccurrence) | dynVal == firstOccurrence -> do
-                  -- Second occurrence confirmed by equality check - create shared entry
-                  let !_ = emitEvent (Text.pack typeName) hasShallowId hashPreview fullHashPreview shallowIdBytes True estimatedSz
-                  newId <- use fastNextReferenceId
-                  fastNextReferenceId .= (newId + 1)
-                  fastSharedTable . at newId ?= firstOccurrence
-                  fastSeenHashes . at shallowHash ?= Right newId
-                  fastStats . typeDeduplicated %= Map.insertWith (+) typeName 1
-                  let savedBytes = estimateSize dynVal
-                  fastStats . typeBytesSaved %= Map.insertWith (+) typeName savedBytes
-                  return $ DynamicValue (DReference newId) Nothing currentSchemaVersion Nothing
-                Just (Left _) -> do
-                  -- Hash collision with first occurrence - treat as new
-                  -- Keep the first occurrence, add this as separate
-                  dedupedVal <- deduplicateChildrenShallow dynVal
-                  return dedupedVal
+                Just (FirstSeen firstOccurrence)
+                  | dynVal == firstOccurrence -> do
+                      -- Second occurrence confirmed by equality check - create shared entry
+                      -- CRITICAL: Dedup children of the first occurrence before storing
+                      -- in the shared table. Without this, shared table entries contain
+                      -- fully expanded sub-trees with no internal deduplication.
+                      let !_ = emitEvent (Text.pack typeName) hasShallowId hashPreview fullHashPreview shallowIdBytes True estimatedSz
+                      newId <- use fastNextReferenceId
+                      fastNextReferenceId .= (newId + 1)
+                      dedupedFirst <- deduplicateChildrenShallow firstOccurrence
+                      fastSharedTable . at newId ?= dedupedFirst
+                      fastSeenHashes . at shallowHash ?= Promoted newId firstOccurrence
+                      fastStats . typeDeduplicated %= Map.insertWith (+) typeName 1
+                      let savedBytes = estimateSize dynVal
+                      fastStats . typeBytesSaved %= Map.insertWith (+) typeName savedBytes
+                      return $ DynamicValue (DReference newId) Nothing currentSchemaVersion Nothing
+                  | otherwise -> do
+                      -- Hash collision with first occurrence - treat as new
+                      -- Keep the first occurrence, add this as separate
+                      dedupedVal <- deduplicateChildrenShallow dynVal
+                      return dedupedVal
                 Nothing -> do
                   -- First occurrence - record and process children
                   -- Emit instrumentation event (force evaluation)
                   let !_ = emitEvent (Text.pack typeName) hasShallowId hashPreview fullHashPreview shallowIdBytes False estimatedSz
-                  fastSeenHashes . at shallowHash ?= Left dynVal
+                  fastSeenHashes . at shallowHash ?= FirstSeen dynVal
                   dedupedVal <- deduplicateChildrenShallow dynVal
                   return dedupedVal
 
