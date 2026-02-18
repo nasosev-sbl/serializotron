@@ -344,14 +344,14 @@ instance (Ord a, FromSZT a) => FromSZT (Set.Set a) where
 instance (ToSZT k, ToSZT v) => ToSZT (HashMap.HashMap k v) where
   toSzt m = toSzt (HashMap.toList m)
 
-instance (Eq k, Hashable k, FromSZT k, FromSZT v) => FromSZT (HashMap.HashMap k v) where
+instance (Hashable k, FromSZT k, FromSZT v) => FromSZT (HashMap.HashMap k v) where
   fromSzt dv = HashMap.fromList <$> fromSzt dv
 
 -- HashSet
 instance (ToSZT a) => ToSZT (HashSet.HashSet a) where
   toSzt s = toSzt (HashSet.toList s)
 
-instance (Eq a, Hashable a, FromSZT a) => FromSZT (HashSet.HashSet a) where
+instance (Hashable a, FromSZT a) => FromSZT (HashSet.HashSet a) where
   fromSzt dv = HashSet.fromList <$> fromSzt dv
 
 -- Vector

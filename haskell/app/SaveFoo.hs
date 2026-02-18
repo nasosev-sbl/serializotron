@@ -1,13 +1,11 @@
-{-# LANGUAGE DeriveAnyClass #-}
-{-# LANGUAGE DeriveGeneric #-}
-
 module Main where
 
 import GHC.Generics
 import Serializotron
 
 data Foo = A Int | B Int
-  deriving (Generic, Show, Eq, ToSZT, FromSZT)
+  deriving stock (Generic, Show, Eq)
+  deriving anyclass (ToSZT, FromSZT)
 
 main :: IO ()
 main = do
