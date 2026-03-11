@@ -17,6 +17,7 @@ import Test.Serializotron.InspiredExamples
 import Test.Serializotron.RoundTripTests
 import Test.Serializotron.TypeInfoTests
 import Test.Serializotron.ShallowExampleTests
+import Test.Serializotron.MemoTests
 
 main :: IO ()
 main = defaultMain tests
@@ -29,6 +30,7 @@ tests = testGroup "Serializotron Tests"
   , inspiredExamplesTests
   , typeInfoTests
   , shallowExampleTests
+  , memoTests
   ]
 
 -- Convert unit tests to Tasty format

@@ -118,7 +118,8 @@ test-suite serializotron-test
                       Test.Serializotron.InspiredExamples,
                       Test.Serializotron.RoundTripTests,
                       Test.Serializotron.TypeInfoTests,
-                      Test.Serializotron.ShallowExampleTests
+                      Test.Serializotron.ShallowExampleTests,
+                      Test.Serializotron.MemoTests
 
 executable szt
     import:           warnings, common
