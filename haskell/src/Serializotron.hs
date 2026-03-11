@@ -129,7 +129,7 @@ module Serializotron where
 
 import Codec.Compression.GZip qualified as GZip
 import Control.Applicative ((<|>))
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, bracket_, try)
 import Control.Lens
 import Control.Monad (unless, when, zipWithM)
 import Control.Monad.State.Strict
@@ -3746,26 +3746,17 @@ memoizedFromSzt f dv = case _dvShallowId dv of
   Nothing -> f dv
   Just sid -> unsafePerformIO $ do
     let key = (typeRep (Proxy @a), sid)
-    cache <- readIORef fromSztMemoCache
-    case Map.lookup key cache of
-      Just dyn | Just val <- fromDynamic dyn -> pure (Right val)
-      _ -> do
-        let result = f dv
-        case result of
-          Right val ->
-            atomicModifyIORef' fromSztMemoCache $ \c ->
-              (Map.insert key (toDyn val) c, ())
-          Left _ -> pure ()
-        pure result
+    atomicModifyIORef' fromSztMemoCache $ \cache ->
+      case Map.lookup key cache of
+        Just dyn | Just val <- fromDynamic dyn -> (cache, Right val)
+        _ -> case f dv of
+          Right val -> (Map.insert key (toDyn val) cache, Right val)
+          err -> (cache, err)
 
 -- | Run an IO action with memo caches active. Resets both caches
--- before and after the action, ensuring no leaks or cross-contamination
--- between serialisation cycles.
+-- before and after the action (even if the action throws), ensuring
+-- no leaks or cross-contamination between serialisation cycles.
 withSztMemoization :: IO a -> IO a
-withSztMemoization action = do
-  resetToSztMemoCache
-  resetFromSztMemoCache
-  result <- action
-  resetToSztMemoCache
-  resetFromSztMemoCache
-  pure result
+withSztMemoization = bracket_ resetCaches resetCaches
+  where
+    resetCaches = resetToSztMemoCache >> resetFromSztMemoCache
